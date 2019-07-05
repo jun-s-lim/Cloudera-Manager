@@ -1,2 +1,0 @@
-# Cloudera-Manager
->ss

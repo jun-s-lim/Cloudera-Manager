@@ -1,0 +1,155 @@
+# Cluster configuration using CM
+
+## Web Cloudera Wizard
+
+1. 로그인: admin/admin
+2. 패키지: impala 패키지 선택
+
+### Parcel 설치 방법
+
+1. parcel로 이동 (우상단 선물 그림 아이콘)
+2. 해당 패키지에서 Download 버튼 클릭
+3. Distribute 버튼 클릭
+4. Activate 버튼 클릭
+
+## Setup Sqoop
+
+1. Add Service로 이동
+2. Sqoop1 패키지 선택 (Sqoop2는 deprecated 될 가능성 있음)
+3. Gateway: 모든 노드
+
+## Setup Impala
+
+1. Add Service로 이동
+2. 역할 선택 -> statestore: CM 노드, metastore: CM 노드, impalad: 모든 데이터 노드
+3. Hue 서비스 > 구성으로 이동
+4. Impala 서비스 none -> Impala 선택 후 변경 내용 저장
+5. 서비스 재시작
+
+## Setup Kafka
+
+5. Add Service로 이동
+6. Kafka Broker 설치: 모든 데이터 노드
+7. 옵션 설정은 전부 default로 진행
+
+## Setup Spark
+
+CM에서 spark 바로 설치하면 1.6버전이 설치됨. 2.x 설치하려면 아래를 진행해야한다.
+
+1. scala 2.11 이상 설치: 모든 노드
+```bash
+cd
+wget http://downloads.lightbend.com/scala/2.11.8/scala-2.11.8.rpm
+sudo yum install scala-2.11.8.rpm -y
+```
+2. parcels > configuration > remote parcel [(참고문서)](https://www.cloudera.com/documentation/spark2/latest/topics/spark2_packaging.html)
+3. 파일 다운로드
+```bash
+cd /opt/cloudera/csd
+wget http://archive.cloudera.com/spark2/csd/SPARK2_ON_YARN-2.4.0.cloudera2.jar
+```
+4. csd 파일 권한 변경 [(참고문서)](https://www.cloudera.com/documentation/spark2/latest/topics/spark2_installing.html)
+```bash
+chown cloudera-scm:cloudera-scm SPARK2_ON_YARN-2.4.0.cloudera2.jar
+chmod 644 SPARK2_ON_YARN-2.4.0.cloudera2.jar
+```
+5. CM 서비스 재시작
+```bash
+sudo systemctl restart cloudera-scm-server
+```
+6. Add Service - 스파크
+7. Spark2, HDFS, Hive, Zookeeper 선택
+8. 진행 계속
+
+# Test out Cluster
+
+1. create user “training” in linux (All nodes)
+```bash
+sudo su
+adduser training
+usermod -aG wheel training
+exit
+sudo su training
+groups
+# training wheel -> wheel 추가 확인
+```
+2. create user “training” in hdfs
+```bash
+su hdfs
+hdfs dfs -mkdir /user/training
+hdfs dfs -chown training:training /user/training
+hdfs dfs -ls /user
+```
+3. create the sample tables that will be used for the rest of the test
+```bash
+# zip 파일들을 미리 1번 노드에 업로드 함
+sudo mv *.zip /training
+sudo chmod training:training *.zip
+su - training
+unzip -Z authors.sql.zip
+unzip -Z posts23.sql.zip
+mysql -u root -p
+```
+```sql
+CREATE DATABASE test DEFAULT CHARACTER SET utf8 DEFAULT COLLATE utf8_general_ci;
+use test;
+source /home/training/authors.sql
+source /home/training/posts23.sql
+
+create user 'training'@'localhost' identified by 'training';
+create user 'training'@'%' identified by 'training';
+grant all on test.* to 'training'@'%' identified by 'test';
+select user,host from mysql.user where user='training' ;
+exit;
+```
+4. extract tables posts from the database and create Hive tables (managed)
+```bash
+# sqooping posts table
+sqoop import --connect jdbc:mysql://h1:3306/test \
+--username root \
+-P \
+--split-by id \
+--columns id,author_id,title,description,content,date \
+--table posts \
+--fields-terminated-by "\t" \
+--hive-table default.posts \
+--create-hive-table \
+--hive-import
+```
+5. extract tables authors from the database and create Hive tables (external)
+```bash
+# sqooping authors table
+sqoop import --connect jdbc:mysql://h1:3306/test \
+--username root \
+-P \
+--split-by id \
+--columns id,first_name,last_name,email,birthdate,added \
+--table authors \
+--fields-terminated-by "\t" \
+--hive-table default.authors \
+--create-hive-table \
+--hive-import
+```
+```sql
+ALTER TABLE default.authors SET TBLPROPERTIES('EXTERNAL'='TRUE');
+```
+```bash
+# copy
+hdfs dfs -cp /user/hive/warehouse/authors /user/training/authors
+```
+```sql
+-- change hdfs path on schema
+USE default;
+DESC extended default.authors;
+ALTER TABLE default.authors SET LOCATION "/user/training/authors";
+```
+6. test hive query
+```sql
+create table results
+stored as textfile
+as select a.id as id, a.first_name as fname, a.last_name as lname, count(*)
+ from authors a
+ join posts p on (a.id = p.author_id)
+ group by a.id, a.first_name, a.last_name
+ ;
+```
